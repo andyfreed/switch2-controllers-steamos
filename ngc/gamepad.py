@@ -61,6 +61,10 @@ PRO_BUTTON_MAP = {
     "C": e.BTN_C,
     "L_STK": e.BTN_THUMBL,
     "R_STK": e.BTN_THUMBR,
+    # Rear grip buttons. BTN_GRIPL/BTN_GRIPR were added in Linux 6.17; use the
+    # numeric codes so older python-evdev builds without the names still work.
+    "GL": getattr(e, "BTN_GRIPL", 0x224),
+    "GR": getattr(e, "BTN_GRIPR", 0x225),
 }
 
 # ZL/Z and L/R click share shoulder slots so Steam and emulators see standard bumpers.

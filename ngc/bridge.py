@@ -14,7 +14,9 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import math
 import os
+import struct
 import subprocess
 import threading
 import time
@@ -31,6 +33,7 @@ from .device import SwitchController
 from .dsu import DSUServer
 from .gamepad import SwitchGamepad
 from .motion_evdev import MotionEvdev
+from . import procon_uhid
 from .status import BridgeState, ControllerState, clear_state, write_state
 
 # Written by system/bazzite-set-player-leds.py when emulator player order changes.
@@ -49,8 +52,8 @@ _STATUS_INTERVAL_S = 1.5
 _SCAN_SETTLE_S = 0.10
 # Per-attempt L2CAP connect wait. Short windows fail when Steam keeps LE scan
 # busy; after btmgmt stop-find -l a few hundred ms is enough.
-_CONNECT_ATTEMPT_S = 0.80
-_CONNECT_ATTEMPTS = 16
+_CONNECT_ATTEMPT_S = float(os.environ.get("NGC_CONNECT_ATTEMPT_S", "0.80"))
+_CONNECT_ATTEMPTS = int(os.environ.get("NGC_CONNECT_ATTEMPTS", "16"))
 # Pairing-mode adverts are brief; wake adverts repeat often. A short TTL caused
 # missed connects when Sync was held or the 0.25s scan window slipped.
 _SEEN_TTL_WAKE_S = 4.0
@@ -69,6 +72,27 @@ def _adapter_index() -> str:
 
 
 _BTMGMT_LOCK = threading.Lock()
+_SUDO_OK: Optional[bool] = None
+
+
+def _sudo_available() -> bool:
+    """True when passwordless sudo works. Checked once; SteamOS requires a
+    password, so the btmgmt calls would only fail and spam the auth log."""
+    global _SUDO_OK
+    if _SUDO_OK is None:
+        if os.environ.get("NGC_NO_SUDO", "").lower() in {"1", "true", "yes"}:
+            _SUDO_OK = False
+        else:
+            try:
+                _SUDO_OK = subprocess.run(
+                    ["sudo", "-n", "true"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0,
+                ).returncode == 0
+            except Exception:  # noqa: BLE001
+                _SUDO_OK = False
+        if not _SUDO_OK:
+            logger.info("passwordless sudo unavailable; skipping btmgmt LE-scan clears")
+    return _SUDO_OK
 _LAST_LE_SCAN_OFF = 0.0
 _LE_SCAN_OFF_MIN_INTERVAL_S = 0.35
 
@@ -98,6 +122,8 @@ def _force_le_scan_off(*, force: bool = False) -> None:
     Never raises — a hung btmgmt must not crash the bridge.
     """
     global _LAST_LE_SCAN_OFF
+    if not _sudo_available():
+        return
     now = time.monotonic()
     with _BTMGMT_LOCK:
         if not force and (now - _LAST_LE_SCAN_OFF) < _LE_SCAN_OFF_MIN_INTERVAL_S:
@@ -540,8 +566,61 @@ class _Worker:
         except Exception as exc:  # noqa: BLE001
             logger.debug("rumble failed: %s", exc)
 
+    def _use_uhid(self, ctrl: SwitchController) -> bool:
+        """Virtual Pro Controller (Steam-native gyro) when /dev/uhid is usable.
+        NGC_OUTPUT = auto (default) | uhid | uinput."""
+        mode = os.environ.get("NGC_OUTPUT", "auto").strip().lower()
+        if mode == "uinput" or ctrl.product_id != P.PRO_CONTROLLER2_PID:
+            return False
+        if procon_uhid.uhid_available():
+            return True
+        if mode == "uhid":
+            logger.warning("NGC_OUTPUT=uhid but /dev/uhid is not accessible; using uinput")
+        return False
+
+    def _read_gyro_bias(self, ctrl: SwitchController) -> tuple:
+        """Factory zero-rate gyro bias (three floats, rad/s) from controller flash."""
+        try:
+            data = ctrl.read_memory(0x10, 0x13040)
+            bias = struct.unpack_from("<3f", data, 4)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("gyro bias read failed: %s", exc)
+            return (0.0, 0.0, 0.0)
+        if not all(math.isfinite(b) and abs(b) < 1.0 for b in bias):
+            return (0.0, 0.0, 0.0)
+        return bias
+
+    def _set_leds_from_host(self, mask: int) -> None:
+        ctrl = self.controller
+        if ctrl is None or not ctrl.is_connected or not mask:
+            return
+        ctrl.write_command(P.COMMAND_LEDS, P.SUBCOMMAND_LEDS_SET_PLAYER,
+                           bytes([mask & 0x0F, 0, 0, 0]))
+
+    def _ensure_uhid(self, ctrl: SwitchController) -> None:
+        if self.gamepad is not None:
+            self.gamepad.rumble_cb = None
+            self.gamepad.close()
+        name = f"{ctrl.name} (P{self.entry.player})"
+        pad = procon_uhid.ProconUHID(
+            name, self.entry.mac,
+            colors=ctrl.info.colors if ctrl.info else None,
+            extra_buttons=os.environ.get("NGC_EXTRA_BUTTONS", ""),
+        )
+        pad.gyro_bias = self._read_gyro_bias(ctrl)
+        pad.led_cb = self._set_leds_from_host
+        pad.power_off_cb = self._sleep_for_idle
+        self.gamepad = pad
+        self.motion = procon_uhid.UhidMotion(pad)
+        self._gamepad_product = ctrl.product_id
+        logger.info("virtual Pro Controller ready: %s (gyro bias %s)", name,
+                    tuple(round(b, 5) for b in pad.gyro_bias))
+
     def _ensure_gamepad(self, ctrl: SwitchController) -> None:
         pid = ctrl.product_id
+        if self._use_uhid(ctrl):
+            self._ensure_uhid(ctrl)
+            return
         if self.gamepad is not None and self._gamepad_product == pid:
             return
         if self.gamepad is not None:
@@ -622,6 +701,9 @@ class _Worker:
             self.motion = None
 
     def _teardown_session(self, *, full: bool = False) -> None:
+        # A virtual HID device should vanish with the controller so Steam shows
+        # a disconnect; the uinput pad stays so emulators keep their binding.
+        full = full or getattr(self.gamepad, "destroy_on_disconnect", False)
         if self.gamepad is not None:
             self.gamepad.rumble_cb = None
             if full:
