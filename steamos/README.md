@@ -84,11 +84,35 @@ Set these as `Environment=` lines in
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `NGC_OUTPUT` | `auto` | `uhid`, `uinput`, or `auto` (uhid when `/dev/uhid` is accessible) |
-| `NGC_EXTRA_BUTTONS` | empty | mirror extra buttons in uhid mode, e.g. `GL=L_STK,GR=R_STK,C=CAPTURE` |
+| `NGC_EXTRA_KEYS` | `GL=KEY_PAGEUP,GR=KEY_PAGEDOWN,C=KEY_SCROLLLOCK` (set by the installer) | keyboard keys sent by the rear grip and C buttons |
+| `NGC_EXTRA_BUTTONS` | empty | make extra buttons copy a controller button instead, e.g. `GL=L_STK,GR=R_STK,C=CAPTURE` |
 | `NGC_NO_SUDO` | unset | `1` skips the `sudo btmgmt` calls without probing |
 | `NGC_CONNECT_ATTEMPT_S` | `0.8` | seconds to wait per connection attempt |
 | `NGC_CONNECT_ATTEMPTS` | `16` | attempts per wake |
 | `NGC_IDLE_SLEEP_S` | `300` | sleep the controller after this long without button presses, `0` disables |
+
+## Rear grip and C buttons
+
+These three buttons cannot travel as gamepad buttons in virtual Pro Controller
+mode. The bridge sends them as keyboard keys from a small virtual keyboard
+named "Switch 2 controller extra buttons". Bind those keys in each game's own
+keyboard settings.
+
+Defaults are Page Up (left grip), Page Down (right grip) and Scroll Lock (C).
+Change them with `NGC_EXTRA_KEYS`, using Linux key names such as `KEY_Q` or
+`KEY_KP1`. Set it to an empty value to make the buttons do nothing.
+
+Avoid `KEY_F13` to `KEY_F24`. Common keyboard layouts turn them into launcher
+keys, which Windows games running under Proton do not receive.
+
+`NGC_OUTPUT=uinput` exposes them as real gamepad buttons instead, at the cost
+of gyro in Steam Input.
+
+## Rumble
+
+Rumble commands in the original Pro Controller format are decoded per grip
+motor and per frequency band, then re-encoded the way SDL's Switch 2 driver
+does it. Amplitude is capped at the limit SDL uses for this controller.
 
 ## Status and limits
 
@@ -98,18 +122,24 @@ Verified on one Steam Deck with one Pro Controller 2, in Desktop Mode:
 - Steam lists it as "Nintendo Switch Pro Controller" on its HIDAPI driver
 - buttons, sticks, d-pad, battery level, player LEDs
 - accelerometer reads 1 g on the up axis at rest, gyro near zero
-- rumble, sent as force feedback through the kernel driver and felt on the controller
+- rumble, sent both as kernel force feedback and as raw Pro Controller rumble
+  reports (the form Steam uses), felt on the controller
+- rear grip buttons arriving as keyboard keys
 
 Not yet verified:
 
 - Game Mode. Steam's background Bluetooth scanning may interfere with connecting.
 - Rumble and gyro direction from inside a Steam game.
+- Whether the first rumble block is the left grip motor, and how distinct the
+  two frequency bands feel.
+- The C button as a keyboard key.
 - Joy-Con 2 and the NSO GameCube controller, which keep using the uinput path.
 
 Known limits:
 
 - The original Pro Controller protocol has no slots for the rear grip buttons
-  or the C button. In uhid mode they can only mirror other buttons.
+  or the C button, so Steam Input cannot see or rebind them. See
+  [Rear grip and C buttons](#rear-grip-and-c-buttons).
 - Reconnecting immediately after a dropped link can fail. Press a button.
 - The protocol is reverse engineered. A controller firmware update can break it.
 - ZL and ZR are digital on this controller.

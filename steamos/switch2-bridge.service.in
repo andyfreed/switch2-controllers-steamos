@@ -15,7 +15,11 @@ Environment=NGC_CONNECT_ATTEMPTS=5
 Environment=NGC_AUTO_REORDER=0
 # Output: auto = virtual Pro Controller when /dev/uhid is accessible, else plain uinput gamepad.
 Environment=NGC_OUTPUT=auto
-# Rear grip and C buttons can mirror other buttons in virtual Pro Controller mode, e.g.
+# Rear grip (GL, GR) and C buttons have no slot in the Pro Controller protocol.
+# They send keyboard keys instead, which games can bind in their own key settings.
+# Any Linux KEY_* name works. Avoid KEY_F13..KEY_F24 (not visible to Proton games).
+Environment=NGC_EXTRA_KEYS=GL=KEY_PAGEUP,GR=KEY_PAGEDOWN,C=KEY_SCROLLLOCK
+# Alternatively they can copy an existing controller button, e.g.
 # Environment=NGC_EXTRA_BUTTONS=GL=L_STK,GR=R_STK,C=CAPTURE
 Restart=always
 RestartSec=3
