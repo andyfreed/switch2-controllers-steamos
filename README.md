@@ -1,5 +1,12 @@
 # Switch 2 Controllers on Linux
 
+> **SteamOS / Steam Deck fork.** This repository adds a virtual Switch Pro
+> Controller output, so Steam Input gets native gyro and rumble from a
+> Pro Controller 2, plus an install path that needs no root.
+> See [steamos/README.md](steamos/README.md). Everything below is the README of
+> the upstream project,
+> [trevlars/switch2-controllers-linux](https://github.com/trevlars/switch2-controllers-linux).
+
 Wireless **Nintendo Switch 2** controller support for Linux. The **NSO GameCube
 controller** and **Pro Controller 2** are tested and working — buttons, analog
 sticks/triggers, **rumble**, **gyro/accelerometer** (via a built-in DSU/cemuhook

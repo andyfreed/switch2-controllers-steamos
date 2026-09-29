@@ -1,0 +1,24 @@
+[Unit]
+Description=Switch 2 controller Bluetooth bridge (Pro Controller 2 -> virtual gamepad)
+After=bluetooth.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@PROJECT_DIR@/.venv/bin/python -m ngc run
+Environment=PYTHONUNBUFFERED=1
+# SteamOS has no passwordless sudo, so skip the btmgmt calls and use longer connect windows.
+Environment=NGC_NO_SUDO=1
+Environment=NGC_CONNECT_ATTEMPT_S=3
+Environment=NGC_CONNECT_ATTEMPTS=5
+# The Bazzite emulator reorder hooks are not installed here.
+Environment=NGC_AUTO_REORDER=0
+# Output: auto = virtual Pro Controller when /dev/uhid is accessible, else plain uinput gamepad.
+Environment=NGC_OUTPUT=auto
+# Rear grip and C buttons can mirror other buttons in virtual Pro Controller mode, e.g.
+# Environment=NGC_EXTRA_BUTTONS=GL=L_STK,GR=R_STK,C=CAPTURE
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
