@@ -98,11 +98,12 @@ Verified on one Steam Deck with one Pro Controller 2, in Desktop Mode:
 - Steam lists it as "Nintendo Switch Pro Controller" on its HIDAPI driver
 - buttons, sticks, d-pad, battery level, player LEDs
 - accelerometer reads 1 g on the up axis at rest, gyro near zero
+- rumble, sent as force feedback through the kernel driver and felt on the controller
 
 Not yet verified:
 
 - Game Mode. Steam's background Bluetooth scanning may interfere with connecting.
-- Rumble feel and gyro direction in a game.
+- Rumble and gyro direction from inside a Steam game.
 - Joy-Con 2 and the NSO GameCube controller, which keep using the uinput path.
 
 Known limits:
