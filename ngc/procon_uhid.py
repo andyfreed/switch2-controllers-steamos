@@ -109,18 +109,29 @@ def decode_amp(encoded: int) -> float:
     return min(1.0, (2.0 ** (((e + 246) / 2.0 + 96) / 32.0)) / 1000.0)
 
 
-def decode_rumble(data: bytes) -> tuple[float, float]:
-    """Return (low_band, high_band) amplitude 0..1 from 8 bytes (left+right)."""
-    low = high = 0.0
+def decode_rumble_sides(data: bytes) -> tuple[tuple[float, float], tuple[float, float]]:
+    """8 rumble bytes -> ((left_low, left_high), (right_low, right_high)), 0..1.
+
+    Hosts use the two dimensions differently: the kernel driver puts the
+    "strong" effect on the left motor and "weak" on the right with equal bands;
+    SDL / Steam send both motors the same data and put low-frequency rumble in
+    the low band and high-frequency rumble in the high band."""
+    sides = []
     for off in (0, 4):
         side = data[off:off + 4]
         if len(side) < 4:
+            sides.append((0.0, 0.0))
             continue
         hf_enc = side[1] & 0xFE
         lf_enc = ((side[3] & 0x7F) - 0x40) * 2 + (side[2] >> 7) if side[3] >= 0x40 else 0
-        high = max(high, decode_amp(hf_enc))
-        low = max(low, decode_amp(lf_enc * 2))
-    return low, high
+        sides.append((decode_amp(lf_enc * 2), decode_amp(hf_enc)))
+    return sides[0], sides[1]
+
+
+def decode_rumble(data: bytes) -> tuple[float, float]:
+    """Return (low_band, high_band) amplitude 0..1, the stronger of both motors."""
+    left, right = decode_rumble_sides(data)
+    return max(left[0], right[0]), max(left[1], right[1])
 
 
 def battery_nibble(mv: Optional[int]) -> int:
@@ -195,6 +206,8 @@ class ProconUHID:
                  extra_buttons: str = ""):
         self.mac = mac.upper()
         self.rumble_cb: Optional[Callable[[float, float], None]] = None
+        # Preferred when set: rumble_sides_cb((low, high) left, (low, high) right).
+        self.rumble_sides_cb: Optional[Callable[[tuple, tuple], None]] = None
         self.led_cb: Optional[Callable[[int], None]] = None
         self.power_off_cb: Optional[Callable[[], None]] = None
 
@@ -212,7 +225,7 @@ class ProconUHID:
         self._timer = 0
         self._running = True
         self._started = threading.Event()
-        self._last_rumble = (0.0, 0.0)
+        self._last_rumble = _NO_RUMBLE
         self._last_rumble_at = 0.0
 
         # Sensor timestamp unit detection (decides the gyro full-scale).
@@ -334,8 +347,8 @@ class ProconUHID:
         while self._running:
             self._send(self._state_report())
             # Rumble needs refreshing by the host; stop if it goes quiet.
-            if self._last_rumble != (0.0, 0.0) and time.monotonic() - self._last_rumble_at > 1.0:
-                self._apply_rumble(0.0, 0.0)
+            if self._last_rumble != _NO_RUMBLE and time.monotonic() - self._last_rumble_at > 1.0:
+                self._apply_rumble(*_NO_RUMBLE)
             next_at += REPORT_PERIOD_S
             delay = next_at - time.monotonic()
             if delay < -0.1:          # fell behind (suspend, stall): resync
@@ -371,15 +384,16 @@ class ProconUHID:
     # Host -> controller                                                   #
     # ------------------------------------------------------------------ #
 
-    def _apply_rumble(self, low: float, high: float) -> None:
-        self._last_rumble = (low, high)
+    def _apply_rumble(self, left: tuple, right: tuple) -> None:
+        self._last_rumble = (left, right)
         self._last_rumble_at = time.monotonic()
-        cb = self.rumble_cb
-        if cb is not None:
-            try:
-                cb(low, high)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("rumble callback failed: %s", exc)
+        try:
+            if self.rumble_sides_cb is not None:
+                self.rumble_sides_cb(left, right)
+            elif self.rumble_cb is not None:
+                self.rumble_cb(max(left[0], right[0]), max(left[1], right[1]))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("rumble callback failed: %s", exc)
 
     def _handle_output(self, data: bytes) -> None:
         if not data:
@@ -387,9 +401,9 @@ class ProconUHID:
         rid = data[0]
         if rid not in (0x01, 0x10) or len(data) < 10:
             return  # 0x80 USB commands get no answer, which tells hosts this is Bluetooth
-        low, high = decode_rumble(data[2:10])
-        if (low, high) != (0.0, 0.0) or self._last_rumble != (0.0, 0.0):
-            self._apply_rumble(low, high)
+        sides = decode_rumble_sides(data[2:10])
+        if sides != _NO_RUMBLE or self._last_rumble != _NO_RUMBLE:
+            self._apply_rumble(*sides)
         if rid == 0x01 and len(data) >= 11:
             self._handle_subcommand(data[10], data[11:])
 
@@ -432,11 +446,7 @@ class ProconUHID:
         if not self._running:
             return
         self._running = False
-        if self.rumble_cb is not None:
-            try:
-                self.rumble_cb(0.0, 0.0)
-            except Exception:  # noqa: BLE001
-                pass
+        self._apply_rumble(*_NO_RUMBLE)
         try:
             os.write(self._fd, struct.pack("<I", UHID_DESTROY))
         except OSError:
@@ -446,6 +456,9 @@ class ProconUHID:
         except OSError:
             pass
         logger.info("removed virtual Pro Controller for %s", self.mac)
+
+
+_NO_RUMBLE = ((0.0, 0.0), (0.0, 0.0))
 
 
 def _quiet(cb, *args) -> None:

@@ -64,6 +64,9 @@ class SwitchController:
         # HD-rumble worker (Pro / Joy-Con only): keeps re-sending the motor
         # packet so effects sustain for as long as the game holds them.
         self._hd_target: tuple[float, float] = (0.0, 0.0)
+        # Per-motor drive: ((left_low, left_high), (right_low, right_high)), 0..1.
+        # When set it takes precedence over the single-magnitude target above.
+        self._hd_sides: Optional[tuple] = None
         self._hd_run = False
         self._hd_thread: Optional[threading.Thread] = None
         self._hd_dirty = threading.Event()
@@ -356,12 +359,64 @@ class SwitchController:
         mag = min(1.0, strong + weak * 0.5)
         return P.VibrationData(lf_freq=cls.HD_LF_FREQ, lf_amp=int(mag * 0x3FF))
 
+    # Two-component drive per motor, as SDL's Switch 2 driver does it: a high
+    # and a low sine component at fixed frequency codes. SDL also caps the
+    # amplitude ("so strong that it might be dangerous to the controller").
+    HD_HIGH_FREQ = 0x187
+    HD_LOW_FREQ = 0x112
+    HD_AMP_MAX = 29000 >> 6  # of a 10-bit field
+
+    @classmethod
+    def _hd_sample(cls, low: float, high: float) -> bytes:
+        """One 5-byte HD sample: bits 0-9 high freq, 10-19 high amp,
+        20-29 low freq, 30-39 low amp."""
+        lo = int(max(0.0, min(1.0, low)) * cls.HD_AMP_MAX)
+        hi = int(max(0.0, min(1.0, high)) * cls.HD_AMP_MAX)
+        value = cls.HD_HIGH_FREQ | (hi << 10) | (cls.HD_LOW_FREQ << 20) | (lo << 30)
+        return value.to_bytes(5, "little")
+
+    def _write_motor_sides(self, left: tuple, right: tuple) -> None:
+        """Drive the left and right grip motors independently."""
+        header = (0x50 + (self._vibration_packet_id & 0x0F)).to_bytes()
+        blocks = b"".join(header + self._hd_sample(*side) * 3 for side in (left, right))
+        self.att.write_command(self.h_vibration, b"\x00" + blocks)
+        self._vibration_packet_id += 1
+
+    def set_hd_rumble_sides(self, left: tuple, right: tuple) -> None:
+        """left / right = (low_amp, high_amp), each 0..1."""
+        if not self.has_hd_rumble:
+            self.set_rumble(max(left[0], right[0]), max(left[1], right[1]))
+            return
+        self._hd_sides = (tuple(left), tuple(right))
+        self._hd_dirty.set()
+
+    def _hd_loop_sides(self, active: bool) -> bool:
+        left, right = self._hd_sides
+        if max(*left, *right) <= 0.001:
+            if active:
+                try:
+                    self._write_motor_sides((0.0, 0.0), (0.0, 0.0))
+                except Exception:  # noqa: BLE001
+                    pass
+            self._hd_dirty.wait(timeout=1.0)
+            self._hd_dirty.clear()
+            return False
+        try:
+            self._write_motor_sides(left, right)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.012)
+        return True
+
     def _hd_loop(self) -> None:
         """Continuously drive the HD motor while a force-feedback effect is
         active. Re-sends at ~60 Hz (matching the console) so the rumble sustains
         smoothly; idles on an event when there is nothing to play."""
         active = False
         while self._hd_run:
+            if self._hd_sides is not None:
+                active = self._hd_loop_sides(active)
+                continue
             strong, weak = self._hd_target
             if strong <= 0.001 and weak <= 0.001:
                 if active:

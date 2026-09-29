@@ -34,6 +34,7 @@ from .dsu import DSUServer
 from .gamepad import SwitchGamepad
 from .motion_evdev import MotionEvdev
 from . import procon_uhid
+from . import extra_keys
 from .status import BridgeState, ControllerState, clear_state, write_state
 
 # Written by system/bazzite-set-player-leds.py when emulator player order changes.
@@ -527,6 +528,7 @@ class _Worker:
         self.slot = max(0, min(3, entry.player - 1))
         self.gamepad: Optional[SwitchGamepad] = None
         self.motion: Optional[MotionEvdev] = None
+        self.extra_keys: Optional[extra_keys.ExtraKeys] = None
         self._gamepad_product: Optional[int] = None
         self.controller: Optional[SwitchController] = None
         self._disconnected = threading.Event()
@@ -548,6 +550,8 @@ class _Worker:
             self.gamepad.update(report.buttons, (lx, ly), (rx, ry), lt, rt)
         if self.motion is not None:
             self.motion.update(report)
+        if self.extra_keys is not None:
+            self.extra_keys.update(report.buttons)
         if self.dsu is not None:
             sticks = (_stick_to_dsu(lx), _stick_to_dsu(ly),
                       _stick_to_dsu(rx), _stick_to_dsu(ry))
@@ -608,6 +612,7 @@ class _Worker:
             extra_buttons=os.environ.get("NGC_EXTRA_BUTTONS", ""),
         )
         pad.gyro_bias = self._read_gyro_bias(ctrl)
+        pad.rumble_sides_cb = self._on_rumble_sides
         pad.led_cb = self._set_leds_from_host
         pad.power_off_cb = self._sleep_for_idle
         self.gamepad = pad
@@ -615,6 +620,15 @@ class _Worker:
         self._gamepad_product = ctrl.product_id
         logger.info("virtual Pro Controller ready: %s (gyro bias %s)", name,
                     tuple(round(b, 5) for b in pad.gyro_bias))
+
+    def _on_rumble_sides(self, left: tuple, right: tuple) -> None:
+        ctrl = self.controller
+        if ctrl is None or not ctrl.is_connected or not self.config.enable_rumble:
+            return
+        try:
+            ctrl.set_hd_rumble_sides(left, right)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("rumble failed: %s", exc)
 
     def _ensure_gamepad(self, ctrl: SwitchController) -> None:
         pid = ctrl.product_id
@@ -671,6 +685,8 @@ class _Worker:
                 logger.info("bonded %s to %s", mac, self.config.adapter_mac)
             self.controller = ctrl
             self._ensure_gamepad(ctrl)
+            if self.extra_keys is None:
+                self.extra_keys = extra_keys.from_env(os.environ.get("NGC_EXTRA_KEYS"))
             if self.gamepad is not None and self.config.enable_rumble:
                 self.gamepad.rumble_cb = self._on_rumble
             if self.dsu is not None:
@@ -691,6 +707,9 @@ class _Worker:
                 ctrl.close()
             except Exception:  # noqa: BLE001
                 pass
+        if self.extra_keys is not None:
+            self.extra_keys.close()
+            self.extra_keys = None
         if self.gamepad is not None:
             self.gamepad.rumble_cb = None
             self.gamepad.close()
@@ -704,6 +723,12 @@ class _Worker:
         # A virtual HID device should vanish with the controller so Steam shows
         # a disconnect; the uinput pad stays so emulators keep their binding.
         full = full or getattr(self.gamepad, "destroy_on_disconnect", False)
+        if self.extra_keys is not None:
+            if full:
+                self.extra_keys.close()
+                self.extra_keys = None
+            else:
+                self.extra_keys.release_all()
         if self.gamepad is not None:
             self.gamepad.rumble_cb = None
             if full:
